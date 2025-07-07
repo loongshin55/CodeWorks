@@ -1,0 +1,42 @@
+### 題目連結  
+https://zerojudge.tw/ShowProblem?problemid=a012  
+https://onlinejudge.org/index.php?option=com_onlinejudge&Itemid=8&category=24&page=show_problem&problem=991
+
+---
+
+## 題目說明  
+
+給定兩個非負整數，代表兩位戰士的軍隊人數，請輸出他們人數的絕對差距。
+
+---
+
+## 解題思路  
+
+- 讀入兩個整數 `a` 與 `b`。
+- 計算兩數之差的絕對值，亦即 `|a - b|`。
+- 輸出此絕對值作為答案。
+- 注意輸入數可能會非常大，因此需要使用 `long long int` 以避免溢位。
+
+---
+
+## 程式碼實作  
+
+```cpp
+#include <iostream>
+using namespace std;
+
+int main()
+{
+    long long int a, b, c;
+    while (cin >> a >> b)
+        if (a > b)
+        {
+            c = a - b;
+            cout << c << '\n';
+        }
+        else
+        {
+            c = b - a;
+            cout << c << '\n';
+        }
+}
