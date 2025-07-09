@@ -301,21 +301,3 @@ plot_images_labels_predict(x_test.numpy().squeeze(), y_test, y_pred_classes, idx
 </details> 
 
 
-<details>
-  <summary>CNN-capsule network.py</summary>
-
-
-  ```python
-  from google.colab import drive
-import sys
-drive.mount('/content/drive/')
-sys.path.append('/content/drive/MyDrive/線性代數作業/')
-
-
-  ```
-
-<h2> output <h2/>
-
-  
-
-</details> 
