@@ -4,7 +4,7 @@
 <details>
   <summary>點我展開詳細說明</summary>
 
-  <h2>詳細程式碼在左手方資料夾裡面</h2>
+  <h2>詳細程式碼在資料夾裡面</h2>
     
   ```cpp
   #include <iostream>
