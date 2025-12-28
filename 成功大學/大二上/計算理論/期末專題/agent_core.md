@@ -1,8 +1,9 @@
 <details>
-  <summary>agent_core.py</summary>
-```python=
-  
-# agent_core.py (最終完整版)
+  <summary>CNN.py</summary>
+
+
+  ```python
+  # agent_core.py (最終完整版)
 import requests
 import json
 import time  # 引入時間模組，用於重試時的延遲
@@ -162,6 +163,8 @@ class LoveAgent:
         # 必須保留 System Prompt，不然重置後 AI 會變笨
         self.conversation_history = [self.conversation_history[0]]
         return "記憶已清除，我們重新開始吧！"
-```
+  ```
 
-</details>
+<h2> output <h2/>
+
+</details> 
