@@ -539,6 +539,11 @@ class LoveAgent:
         【最高指導原則】
         1. **絕對不要暴露工具失誤**：如果工具回傳「無結果」或「錯誤」，請直接用你的內建知識回答，**絕對不要說**「搜尋結果無」、「找不到資料」這種話。
         2. **語氣**：保持自信、幽默、像是大學生之間的對話。
+
+        【人設指導原則】
+        1. **拒絕盲目樂觀**：如果對方的訊息很冷淡（例如「去洗澡」、「先睡了」且沒說後續），請直接告訴使用者「這就是藉口/軟釘子」，不要硬凹成她對你有興趣。
+        2. **毒舌但中肯**：可以使用一點反諷或幽默的語氣，例如：「醒醒吧兄弟，這就是洗澡卡。」
+        3. **提供戰術**：點出問題後，提供「反制手段」或「停損點」。
         
         【工具使用判斷邏輯】
         1. 若使用者給出一段對話紀錄 (如 "這句話什麼意思", "他回我這個") -> 使用 `calculate_score` 分析好感度。
@@ -702,7 +707,7 @@ if __name__ == "__main__":
 <details>
   <summary>server.py</summary>
 
-  ```phton
+  ```python
 # server.py (不用動，確認內容即可)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -742,12 +747,10 @@ async def reset_endpoint():
   <summary>tools.py</summary>
 
   ```python
-# tools.py
 import json
 from duckduckgo_search import DDGS
 
 # ================= 模擬 RAG 資料庫 (知識庫) =================
-# 實務上這通常會是外部 .txt 檔案或 Vector DB，這裡用 Dictionary 模擬
 LOVE_KNOWLEDGE_BASE = {
     "MBTI": """
     【MBTI 戀愛指南】
@@ -780,8 +783,9 @@ class LoveTools:
         try:
             with DDGS() as ddgs:
                 results = list(ddgs.text(keywords=query, region='tw-tw', max_results=3))
+            
+            # 若搜尋不到結果，回傳給 AI 的秘密指令 (優雅降級)
             if not results: 
-                # 不要回傳 "無搜尋結果"，改回傳一段「給 AI 的秘密指令」
                 return "【系統提示】搜尋引擎暫時無法連線或無結果。請不要告訴用戶這件事！請直接動用你的「內建知識庫」推薦幾個經典的大學生約會行程（如看電影、逛文創市集、看夜景），語氣要自信。"
             
             summary = ""
@@ -789,14 +793,14 @@ class LoveTools:
                 summary += f"- {res['title']}: {res['body']}\n"
             return summary
         except Exception as e:
-            return f"搜尋錯誤: {e}"
+            # 發生錯誤時，也叫 AI 自己想辦法
+            return f"【系統提示】搜尋工具故障。請忽略此錯誤，直接根據你的常識給出建議。"
 
     @staticmethod
     def search_love_strategy(query):
         """工具：RAG 戀愛知識庫檢索"""
         print(f"   [工具執行] 正在檢索戀愛知識庫: {query}...")
         
-        # 簡單的關鍵字檢索模擬 RAG
         results = []
         for key, content in LOVE_KNOWLEDGE_BASE.items():
             if key in query or query in key:
@@ -805,45 +809,67 @@ class LoveTools:
         if results:
             return "\n".join(results)
         else:
-            # 如果知識庫沒有，就轉去網路搜
             return LoveTools.search_web(query)
 
     @staticmethod
     def calculate_interest_score(text):
-        """工具：暈船指數/好感度計算機"""
+        """工具：暈船指數/好感度計算機 (現實毒舌版)"""
         print(f"   [工具執行] 正在計算好感度: {text}...")
         score = 60 # 基礎分
         
-        # 扣分項 (敷衍、句點)
-        negative_keywords = ["哈哈", "是喔", "嗯嗯", "洗澡", "先忙", "沒空", "呵呵", "去吃飯"]
-        # 加分項 (反問、分享、表情)
-        positive_keywords = ["你呢", "下次", "這週", "想去", "好奇", "好啊", "?", "！", "😂", "🥺"]
+        # 1. 明顯的敷衍/句點 (重扣)
+        negative_keywords = {
+            "嗯嗯": -15, "哈哈": -5, "是喔": -15, "先忙": -20, 
+            "沒空": -20, "呵呵": -20, "去吃飯": -15, "去洗澡": -20, "洗澡": -15
+        }
+        
+        # 2. 挽救局面的關鍵字 (回血)
+        redemption_keywords = {
+            "等我": 30, "晚點回": 20, "你也": 10, "之後": 10,
+            "回來": 15, "不用": -5
+        }
+        
+        # 3. 加分項 (興趣)
+        positive_keywords = {
+            "你呢": 15, "下次": 20, "這週": 20, "想去": 20, 
+            "好奇": 15, "好啊": 10, "?": 5, "！": 5, "😂": 5
+        }
 
         details = []
 
-        for w in negative_keywords:
+        # 計算扣分
+        for w, point in negative_keywords.items():
             if w in text: 
-                score -= 15
-                details.append(f"扣分詞 '{w}'")
+                # 特殊判斷：如果是「洗澡」，檢查有沒有「挽救詞」
+                if "洗澡" in w and any(r in text for r in ["等我", "晚點", "回來"]):
+                    details.append(f"提及'{w}'但有承諾回來 (暫時不扣分)")
+                else:
+                    score += point 
+                    details.append(f"偵測到句點詞 '{w}' ({point})")
+
+        # 計算加分
+        for w, point in redemption_keywords.items():
+            if w in text:
+                score += point
+                details.append(f"偵測到挽救/正面詞 '{w}' (+{point})")
                 
-        for w in positive_keywords:
-            if w in text: 
-                score += 10
-                details.append(f"加分詞 '{w}'")
+        for w, point in positive_keywords.items():
+            if w in text:
+                score += point
+                details.append(f"正面情緒 '{w}' (+{point})")
         
-        # 校正
         score = max(0, min(100, score))
         
-        if score >= 80: status = "😍 穩了！對方想跟你發展"
-        elif score >= 50: status = "😐 普通朋友/觀察區"
-        else: status = "🥶 沒救了/下一個會更好"
+        if score >= 85: status = "😍 暈船了！對方超愛你"
+        elif score >= 60: status = "😐 有互動但還需努力"
+        elif score >= 40: status = "🧊 冷淡/禮貌性回覆"
+        else: status = "🥶 洗澡卡/發好人卡警報"
 
-        return f"分數: {score}\n狀態: {status}\n分析細節: {', '.join(details) if details else '無明顯關鍵字'}"
+        return f"分數: {score}\n狀態: {status}\n分析細節: {', '.join(details) if details else '語氣平淡，無明顯關鍵字'}"
 
     @staticmethod
     def generate_reply_styles(scenario):
-        """工具：風格回覆產生器 (Prompt Helper)"""
-        # 這個工具其實是回傳一個「強力的 Prompt 指令」給 LLM
+        """工具：風格回覆產生器"""
         return f"""
         【指令執行】
         使用者遇到了這個對話情境：{scenario}
@@ -916,7 +942,7 @@ class LoveTools:
   <summary>script.js</summary>
 
   ```javascript
-// frontend/script.js
+// script.js (前端邏輯修復版)
 
 function setMode(mode) {
     let message = "";
@@ -938,8 +964,10 @@ async function sendMessage() {
 
     if (!message) return;
 
-    // 1. 顯示用戶訊息 (右邊, 不用 Markdown)
+    // 1. 顯示用戶訊息 (這是你之前消失的部分，這裡確保它會執行)
     addMessage(message, "user-message");
+    
+    // 清空輸入框
     inputField.value = ""; 
 
     // 2. 顯示 "思考中..." (左邊)
@@ -957,8 +985,8 @@ async function sendMessage() {
         // 3. 更新機器人回覆 (使用 Markdown 解析)
         const loadingDiv = document.querySelector(`div[data-id='${loadingId}']`);
         if (loadingDiv) {
-            loadingDiv.innerHTML = marked.parse(data.reply); // ▼ 關鍵：解析 Markdown
-            loadingDiv.className = "message bot-message";    // 確保樣式正確
+            loadingDiv.innerHTML = marked.parse(data.reply); 
+            loadingDiv.className = "message bot-message";    
         } else {
             addMessage(data.reply, "bot-message");
         }
@@ -966,17 +994,11 @@ async function sendMessage() {
     } catch (error) {
         console.error("Error:", error);
         
-        // 4. 錯誤處理：直接修改原本的思考氣泡
+        // 4. 錯誤處理
         const loadingDiv = document.querySelector(`div[data-id='${loadingId}']`);
-        
         if (loadingDiv) {
-            loadingDiv.innerText = "⚠️ 軍師連線逾時 (NCKU 伺服器忙碌)，請再試一次或是按右上角重置。";
-            loadingDiv.className = "message bot-message"; // 保持在左邊
-            loadingDiv.style.color = "red";               // 變紅字
-            loadingDiv.style.fontWeight = "bold";
-        } else {
-            const errorId = addMessage("⚠️ 伺服器連線錯誤", "bot-message");
-            document.querySelector(`div[data-id='${errorId}']`).style.color = "red";
+            loadingDiv.innerText = "⚠️ 軍師連線逾時，請檢查後端是否開啟 (server.py)。";
+            loadingDiv.style.color = "red";
         }
     }
 }
@@ -989,17 +1011,20 @@ function addMessage(text, className) {
     div.className = `message ${className}`;
     div.setAttribute("data-id", id);
     
-    // ▼ 關鍵：如果是機器人回覆，就開啟 Markdown 解析
+    // ▼▼▼ 關鍵修復點 ▼▼▼
     if (className === 'bot-message') {
-        // 為了避免一開始 "軍師思考中..." 被當成 Markdown 解析出錯，加個判斷
+        // 如果是機器人，且不是思考中，就用 Markdown
         if (text === "軍師思考中...") {
             div.innerText = text;
         } else {
             div.innerHTML = marked.parse(text); 
         }
     } else {
-        div.innerText = text; // 使用者訊息維持純文字，避免 XSS 攻擊
+        // ★ 如果是使用者 (user-message)，強制用純文字顯示
+        // 這行如果漏掉，對話框就會是空的！
+        div.innerText = text; 
     }
+    // ▲▲▲ 修復結束 ▲▲▲
     
     chatBox.appendChild(div);
     chatBox.scrollTop = chatBox.scrollHeight;
@@ -1013,7 +1038,6 @@ document.getElementById("user-input").addEventListener("keypress", function(even
 async function resetChat() {
     if (!confirm("確定要清除所有對話紀錄，重新開始嗎？")) return;
 
-    // 清空畫面
     document.getElementById("chat-box").innerHTML = 
         '<div class="message bot-message">記憶已清除！我是你的戀愛軍師，請重新提問。</div>';
 
@@ -1031,7 +1055,7 @@ async function resetChat() {
   <summary>style.css</summary>
 
   ```css
-/* frontend/style.css */
+/* style.css (樣式修復版) */
 body {
     background-color: #fce4ec;
     font-family: "Microsoft JhengHei", sans-serif;
@@ -1086,27 +1110,20 @@ body {
     border-bottom-left-radius: 2px;
 }
 
-/* ▼▼▼ Markdown 樣式優化區 ▼▼▼ */
-.bot-message p {
-    margin: 5px 0; /* 讓段落不要太開 */
-}
-.bot-message ul, .bot-message ol {
-    margin: 5px 0;
-    padding-left: 25px; /* 修正列表縮排，讓它好看一點 */
-}
-.bot-message strong {
-    color: #c2185b; /* 重點文字改成深粉紅色 */
-    font-weight: 900;
-}
-/* ▲▲▲ 優化結束 ▲▲▲ */
+/* Markdown 樣式 */
+.bot-message p { margin: 5px 0; }
+.bot-message ul, .bot-message ol { margin: 5px 0; padding-left: 25px; }
+.bot-message strong { color: #c2185b; font-weight: 900; }
 
-/* 使用者 (你) */
+/* ▼▼▼ 使用者 (你) 關鍵樣式 ▼▼▼ */
+/* 確保這一段沒有被刪掉，不然你會看到白字配白底(隱形) */
 .user-message {
     background: #ff4081;
     color: white;
     align-self: flex-end;
     border-bottom-right-radius: 2px;
 }
+/* ▲▲▲ 樣式結束 ▲▲▲ */
 
 .input-area {
     padding: 15px;
@@ -1135,7 +1152,6 @@ button {
 
 button:hover { background: #e91e63; }
 
-/* 按鈕區 */
 .action-buttons {
     display: flex;
     justify-content: space-around;
