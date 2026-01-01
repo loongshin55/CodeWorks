@@ -512,3 +512,656 @@ async function resetChat() {
   ```
 
 </details> 
+
+
+###第2版
+
+<details>
+  <summary>agent_core.py</summary>
+
+  ```python
+# agent_core.py (更新版)
+import requests
+import json
+from config import API_KEY, API_URL, MODEL_NAME, TIMEOUT
+from tools import LoveTools
+
+class LoveAgent:
+    def __init__(self):
+        self.headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        }
+        # ▼▼▼ 新增：初始化 System Prompt 和 記憶列表 ▼▼▼
+        self.system_prompt = """
+        你是一位專業的「戀愛軍師 AI」。你的任務是協助使用者解決戀愛煩惱。
+        
+        【最高指導原則】
+        1. **絕對不要暴露工具失誤**：如果工具回傳「無結果」或「錯誤」，請直接用你的內建知識回答，**絕對不要說**「搜尋結果無」、「找不到資料」這種話。
+        2. **語氣**：保持自信、幽默、像是大學生之間的對話。
+        
+        【工具使用判斷邏輯】
+        1. 若使用者給出一段對話紀錄 (如 "這句話什麼意思", "他回我這個") -> 使用 `calculate_score` 分析好感度。
+        2. 若使用者詢問攻略、星座、MBTI 或如何追求 -> 使用 `search_strategy` 查詢知識庫。
+        3. 若使用者不知道怎麼回覆、求救 -> 使用 `get_reply_styles` 請求生成三種風格回覆。
+        4. 若是尋找地點 (餐廳、電影) -> 使用 `search_web`。
+        
+        【回應格式】
+        請輸出 JSON 格式來呼叫工具：{"tool": "工具名稱", "arg": "參數內容"}
+        如果不需要工具，請直接回覆文字。
+        """
+        self.history = [{"role": "system", "content": self.system_prompt}]
+
+    def reset(self):
+        """新增：清除記憶功能"""
+        self.history = [{"role": "system", "content": self.system_prompt}]
+        return "🧹 記憶已清除，我們重新開始吧！"
+
+    def _call_llm(self, messages):
+        """內部呼叫 LLM API"""
+        payload = {
+            "model": MODEL_NAME,
+            "messages": messages,
+            "stream": False,
+            "temperature": 0.3
+        }
+        try:
+            res = requests.post(API_URL, headers=self.headers, json=payload, timeout=TIMEOUT)
+            if res.status_code == 200:
+                return res.json()['message']['content']
+            else:
+                return f"Error: {res.status_code} - {res.text}"
+        except Exception as e:
+            return f"連線失敗: {e}"
+
+    def _extract_json(self, text):
+        try:
+            cleaned = text.replace("```json", "").replace("```", "").strip()
+            start, end = cleaned.find("{"), cleaned.rfind("}")
+            if start != -1 and end != -1:
+                return json.loads(cleaned[start:end+1])
+        except: pass
+        return None
+
+    def chat(self, user_input):
+        # 1. 把使用者的話加入歷史紀錄
+        self.history.append({"role": "user", "content": user_input})
+
+        # 2. 呼叫 LLM (傳送完整的歷史紀錄)
+        response_text = self._call_llm(self.history)
+        
+        # 3. 檢查工具
+        cmd = self._extract_json(response_text)
+        
+        if cmd and "tool" in cmd:
+            tool_name = cmd["tool"]
+            arg = cmd["arg"]
+            tool_result = ""
+
+            if tool_name == "calculate_score":
+                tool_result = LoveTools.calculate_interest_score(arg)
+            elif tool_name == "search_strategy":
+                tool_result = LoveTools.search_love_strategy(arg)
+            elif tool_name == "search_web":
+                tool_result = LoveTools.search_web(arg)
+            elif tool_name == "get_reply_styles":
+                tool_result = LoveTools.generate_reply_styles(arg)
+            
+            # 把 AI 的第一段思考加入歷史
+            self.history.append({"role": "assistant", "content": response_text})
+            
+            # 把工具結果加入歷史 (作為系統提示)
+            tool_msg = f"【系統提示】工具回傳結果：\n{tool_result}"
+            self.history.append({"role": "user", "content": tool_msg})
+            
+            # 再次呼叫 LLM
+            final_response = self._call_llm(self.history)
+            
+            # 把最終回答加入歷史
+            self.history.append({"role": "assistant", "content": final_response})
+            return final_response
+        
+        else:
+            # 不需要工具，直接把回答加入歷史
+            self.history.append({"role": "assistant", "content": response_text})
+            return response_text
+  ```
+
+</details> 
+
+<details>
+  <summary>config.py</summary>
+
+  ```python
+# config.py
+
+# API 設定
+API_KEY = "070fc5dbe1bd5a7ae8a0e2ef1b47947fd9432133f1b84a3d4a73387a96399442"
+API_URL = "https://api-gateway.netdb.csie.ncku.edu.tw/api/chat"
+MODEL_NAME = "gemma3:4b" # 或其他你偏好的模型
+
+# 系統設定
+TIMEOUT = 30  # API 請求超時秒數
+  ```
+
+</details> 
+
+<details>
+  <summary>main.py.html</summary>
+
+  ```python
+# main.py (更新版)
+from agent_core import LoveAgent
+
+def main():
+    agent = LoveAgent()
+    
+    print("\n" + "="*50)
+    print("💘 戀愛軍師 AI v2.1 (記憶增強版)")
+    print("--------------------------------------------------")
+    print("💡 指令說明：")
+    print(" - 輸入一般文字：與軍師對話")
+    print(" - 輸入「reset」：清除對話記憶")
+    print(" - 輸入「exit」 ：離開程式")
+    print("="*50)
+
+    while True:
+        try:
+            user_input = input("\n[你] > ")
+            
+            # ▼▼▼ 處理指令 ▼▼▼
+            if user_input.lower() in ["exit", "quit", "88"]:
+                print("👋 祝你戀愛順利！")
+                break
+            
+            if user_input.lower() == "reset":
+                msg = agent.reset()
+                print(f"🤖 {msg}")
+                continue
+            # ▲▲▲ 處理結束 ▲▲▲
+
+            if not user_input.strip(): continue
+            
+            print("🤖 軍師思考中...", end="\r")
+            reply = agent.chat(user_input)
+            
+            print(f"\n[軍師]：\n{reply}")
+            print("-" * 30)
+            
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"發生錯誤: {e}")
+
+if __name__ == "__main__":
+    main()
+  ```
+
+</details> 
+
+<details>
+  <summary>server.py</summary>
+
+  ```phton
+# server.py (不用動，確認內容即可)
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from agent_core import LoveAgent
+
+app = FastAPI()
+agent = LoveAgent()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class ChatRequest(BaseModel):
+    message: str
+
+@app.post("/api/chat")
+async def chat_endpoint(req: ChatRequest):
+    print(f"收到前端訊息: {req.message}")
+    response_text = agent.chat(req.message)
+    return {"reply": response_text}
+
+@app.post("/api/reset")
+async def reset_endpoint():
+    print("收到重置請求...")
+    msg = agent.reset()
+    return {"reply": msg}
+  ```
+
+</details> 
+
+<details>
+  <summary>tools.py</summary>
+
+  ```python
+# tools.py
+import json
+from duckduckgo_search import DDGS
+
+# ================= 模擬 RAG 資料庫 (知識庫) =================
+# 實務上這通常會是外部 .txt 檔案或 Vector DB，這裡用 Dictionary 模擬
+LOVE_KNOWLEDGE_BASE = {
+    "MBTI": """
+    【MBTI 戀愛指南】
+    - I 人 (內向)：喜歡安靜的陪伴，不要強迫他們去太多人的聚會。
+    - E 人 (外向)：喜歡戶外活動，多稱讚他們，陪他們瘋。
+    - 雙魚座/F型人：吃軟不吃硬，需要大量的情緒價值，送手寫信會加分。
+    """,
+    "推拉": """
+    【推拉理論 (Push-Pull)】
+    核心概念：製造情緒波動。
+    - 推：適度冷淡、開玩笑損對方 (例如：「你長得好像這隻醜貓喔」)。
+    - 拉：突然的稱讚、關心 (例如：「但其實蠻可愛的啦」)。
+    - 效果：讓對方心情像坐雲霄飛車，產生「多巴胺」。
+    """,
+    "星座": """
+    【星座攻略】
+    - 土象 (金牛/處女/摩羯)：務實，送禮要送實用的，約會準時很重要。
+    - 水象 (巨蟹/天蠍/雙魚)：敏感，需要安全感，訊息要回快一點。
+    - 火象 (牡羊/獅子/射手)：直球對決，不喜歡猜測，喜歡自信的人。
+    - 風象 (雙子/天秤/水瓶)：喜歡聰明人，話題要多變，不能太黏。
+    """
+}
+
+class LoveTools:
+    
+    @staticmethod
+    def search_web(query):
+        """工具：聯網搜尋 (DuckDuckGo)"""
+        print(f"   [工具執行] 正在搜尋網路: {query}...")
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(keywords=query, region='tw-tw', max_results=3))
+            if not results: 
+                # 不要回傳 "無搜尋結果"，改回傳一段「給 AI 的秘密指令」
+                return "【系統提示】搜尋引擎暫時無法連線或無結果。請不要告訴用戶這件事！請直接動用你的「內建知識庫」推薦幾個經典的大學生約會行程（如看電影、逛文創市集、看夜景），語氣要自信。"
+            
+            summary = ""
+            for res in results:
+                summary += f"- {res['title']}: {res['body']}\n"
+            return summary
+        except Exception as e:
+            return f"搜尋錯誤: {e}"
+
+    @staticmethod
+    def search_love_strategy(query):
+        """工具：RAG 戀愛知識庫檢索"""
+        print(f"   [工具執行] 正在檢索戀愛知識庫: {query}...")
+        
+        # 簡單的關鍵字檢索模擬 RAG
+        results = []
+        for key, content in LOVE_KNOWLEDGE_BASE.items():
+            if key in query or query in key:
+                results.append(content)
+        
+        if results:
+            return "\n".join(results)
+        else:
+            # 如果知識庫沒有，就轉去網路搜
+            return LoveTools.search_web(query)
+
+    @staticmethod
+    def calculate_interest_score(text):
+        """工具：暈船指數/好感度計算機"""
+        print(f"   [工具執行] 正在計算好感度: {text}...")
+        score = 60 # 基礎分
+        
+        # 扣分項 (敷衍、句點)
+        negative_keywords = ["哈哈", "是喔", "嗯嗯", "洗澡", "先忙", "沒空", "呵呵", "去吃飯"]
+        # 加分項 (反問、分享、表情)
+        positive_keywords = ["你呢", "下次", "這週", "想去", "好奇", "好啊", "?", "！", "😂", "🥺"]
+
+        details = []
+
+        for w in negative_keywords:
+            if w in text: 
+                score -= 15
+                details.append(f"扣分詞 '{w}'")
+                
+        for w in positive_keywords:
+            if w in text: 
+                score += 10
+                details.append(f"加分詞 '{w}'")
+        
+        # 校正
+        score = max(0, min(100, score))
+        
+        if score >= 80: status = "😍 穩了！對方想跟你發展"
+        elif score >= 50: status = "😐 普通朋友/觀察區"
+        else: status = "🥶 沒救了/下一個會更好"
+
+        return f"分數: {score}\n狀態: {status}\n分析細節: {', '.join(details) if details else '無明顯關鍵字'}"
+
+    @staticmethod
+    def generate_reply_styles(scenario):
+        """工具：風格回覆產生器 (Prompt Helper)"""
+        # 這個工具其實是回傳一個「強力的 Prompt 指令」給 LLM
+        return f"""
+        【指令執行】
+        使用者遇到了這個對話情境：{scenario}
+        請立即生成三種不同風格的回覆建議：
+        
+        1. 🥶 **高冷版 (High Value)**：簡短、自信、不卑不亢，引發對方好奇。
+        2. 😂 **幽默版 (Funny)**：用開玩笑化解尷尬，展現有趣靈魂。
+        3. 🐶 **舔狗版 (Simp/Warm)**：極度溫柔體貼 (警告：可能顯得地位低，僅供參考)。
+        
+        請直接列出這三種回覆。
+        """
+  ```
+
+</details> 
+
+<details>
+  <summary>index.html</summary>
+
+  ```html
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>💘 戀愛軍師 AI</title>
+    <link rel="stylesheet" href="style.css">
+    
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="header">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h1 style="margin: 0; font-size: 24px;">💘 戀愛軍師 AI</h1>
+                    <p style="margin: 0; font-size: 14px; opacity: 0.9;">你的專屬感情顧問</p>
+                </div>
+                
+                <button onclick="resetChat()" style="background: rgba(255,255,255,0.3); border: 1px solid white; color: white; padding: 6px 15px; border-radius: 20px; cursor: pointer; font-weight: bold; font-size: 14px; transition: 0.2s;">
+                    🔄 重新開始
+                </button>
+            </div>
+        </div>
+
+        <div class="action-buttons">
+            <button class="action-btn" onclick="setMode('date')">📅 安排約會</button>
+            <button class="action-btn" onclick="setMode('analysis')">🧐 對話分析</button>
+            <button class="action-btn" onclick="setMode('horoscope')">🔮 戀愛運勢</button>
+        </div>
+
+        <div class="chat-box" id="chat-box">
+            <div class="message bot-message">你好！我是你的戀愛軍師，請點擊上方按鈕選擇服務，或直接跟我聊天！</div>
+        </div>
+
+        <div class="input-area">
+            <input type="text" id="user-input" placeholder="輸入你的問題..." />
+            <button class="send-btn" onclick="sendMessage()">發送</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+  ```
+
+</details> 
+
+
+<details>
+  <summary>script.js</summary>
+
+  ```javascript
+// frontend/script.js
+
+function setMode(mode) {
+    let message = "";
+    if (mode === 'date') {
+        message = "請幫我安排一個適合大學生的一日約會行程，風格要青春浪漫。";
+    } else if (mode === 'analysis') {
+        message = "我有一段跟曖昧對象的對話紀錄，請幫我分析對方對我的好感度，以及我該怎麼回覆。（請準備好，我等一下貼給你）";
+    } else if (mode === 'horoscope') {
+        message = "我想測今天的戀愛運勢，請給我一些幸運建議！";
+    }
+    const inputField = document.getElementById("user-input");
+    inputField.value = message;
+    sendMessage();
+}
+
+async function sendMessage() {
+    const inputField = document.getElementById("user-input");
+    const message = inputField.value.trim();
+
+    if (!message) return;
+
+    // 1. 顯示用戶訊息 (右邊, 不用 Markdown)
+    addMessage(message, "user-message");
+    inputField.value = ""; 
+
+    // 2. 顯示 "思考中..." (左邊)
+    const loadingId = addMessage("軍師思考中...", "bot-message");
+
+    try {
+        const response = await fetch("http://127.0.0.1:8000/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: message })
+        });
+
+        const data = await response.json();
+
+        // 3. 更新機器人回覆 (使用 Markdown 解析)
+        const loadingDiv = document.querySelector(`div[data-id='${loadingId}']`);
+        if (loadingDiv) {
+            loadingDiv.innerHTML = marked.parse(data.reply); // ▼ 關鍵：解析 Markdown
+            loadingDiv.className = "message bot-message";    // 確保樣式正確
+        } else {
+            addMessage(data.reply, "bot-message");
+        }
+
+    } catch (error) {
+        console.error("Error:", error);
+        
+        // 4. 錯誤處理：直接修改原本的思考氣泡
+        const loadingDiv = document.querySelector(`div[data-id='${loadingId}']`);
+        
+        if (loadingDiv) {
+            loadingDiv.innerText = "⚠️ 軍師連線逾時 (NCKU 伺服器忙碌)，請再試一次或是按右上角重置。";
+            loadingDiv.className = "message bot-message"; // 保持在左邊
+            loadingDiv.style.color = "red";               // 變紅字
+            loadingDiv.style.fontWeight = "bold";
+        } else {
+            const errorId = addMessage("⚠️ 伺服器連線錯誤", "bot-message");
+            document.querySelector(`div[data-id='${errorId}']`).style.color = "red";
+        }
+    }
+}
+
+function addMessage(text, className) {
+    const chatBox = document.getElementById("chat-box");
+    const div = document.createElement("div");
+    const id = Date.now();
+    
+    div.className = `message ${className}`;
+    div.setAttribute("data-id", id);
+    
+    // ▼ 關鍵：如果是機器人回覆，就開啟 Markdown 解析
+    if (className === 'bot-message') {
+        // 為了避免一開始 "軍師思考中..." 被當成 Markdown 解析出錯，加個判斷
+        if (text === "軍師思考中...") {
+            div.innerText = text;
+        } else {
+            div.innerHTML = marked.parse(text); 
+        }
+    } else {
+        div.innerText = text; // 使用者訊息維持純文字，避免 XSS 攻擊
+    }
+    
+    chatBox.appendChild(div);
+    chatBox.scrollTop = chatBox.scrollHeight;
+    return id;
+}
+
+document.getElementById("user-input").addEventListener("keypress", function(event) {
+    if (event.key === "Enter") sendMessage();
+});
+
+async function resetChat() {
+    if (!confirm("確定要清除所有對話紀錄，重新開始嗎？")) return;
+
+    // 清空畫面
+    document.getElementById("chat-box").innerHTML = 
+        '<div class="message bot-message">記憶已清除！我是你的戀愛軍師，請重新提問。</div>';
+
+    try {
+        await fetch("http://127.0.0.1:8000/api/reset", { method: "POST" });
+    } catch (error) {
+        alert("重置失敗，請檢查後端連線");
+    }
+}
+  ```
+
+</details> 
+
+<details>
+  <summary>style.css</summary>
+
+  ```css
+/* frontend/style.css */
+body {
+    background-color: #fce4ec;
+    font-family: "Microsoft JhengHei", sans-serif;
+    display: flex;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+}
+
+.chat-container {
+    width: 400px;
+    height: 600px;
+    background: white;
+    border-radius: 20px;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    margin-top: 50px;
+}
+
+.header {
+    background: #ff4081;
+    color: white;
+    padding: 20px;
+    text-align: center;
+}
+
+.chat-box {
+    flex: 1;
+    padding: 20px;
+    overflow-y: auto;
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.message {
+    padding: 10px 15px;
+    border-radius: 15px;
+    max-width: 80%;
+    line-height: 1.5;
+    word-wrap: break-word;
+}
+
+/* 機器人 (軍師) */
+.bot-message {
+    background: #f0f0f0;
+    color: #333;
+    align-self: flex-start;
+    border-bottom-left-radius: 2px;
+}
+
+/* ▼▼▼ Markdown 樣式優化區 ▼▼▼ */
+.bot-message p {
+    margin: 5px 0; /* 讓段落不要太開 */
+}
+.bot-message ul, .bot-message ol {
+    margin: 5px 0;
+    padding-left: 25px; /* 修正列表縮排，讓它好看一點 */
+}
+.bot-message strong {
+    color: #c2185b; /* 重點文字改成深粉紅色 */
+    font-weight: 900;
+}
+/* ▲▲▲ 優化結束 ▲▲▲ */
+
+/* 使用者 (你) */
+.user-message {
+    background: #ff4081;
+    color: white;
+    align-self: flex-end;
+    border-bottom-right-radius: 2px;
+}
+
+.input-area {
+    padding: 15px;
+    border-top: 1px solid #eee;
+    display: flex;
+    gap: 10px;
+}
+
+input {
+    flex: 1;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 20px;
+    outline: none;
+}
+
+button {
+    background: #ff4081;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 20px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+button:hover { background: #e91e63; }
+
+/* 按鈕區 */
+.action-buttons {
+    display: flex;
+    justify-content: space-around;
+    padding: 10px;
+    background-color: #fce4ec;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.action-btn {
+    background: white;
+    color: #ff4081;
+    border: 1px solid #ff4081;
+    border-radius: 15px;
+    padding: 5px 12px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.action-btn:hover {
+    background: #ff4081;
+    color: white;
+    transform: translateY(-2px);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+  ```
+
+</details> 
