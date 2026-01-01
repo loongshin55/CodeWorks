@@ -6,8 +6,12 @@
 # agent_core.py
 import requests
 import json
+import ast
+import time
+import re
 from config import API_KEY, API_URL, MODEL_NAME, TIMEOUT
 from tools import LoveTools
+from relationship_manager import RelationshipManager
 
 class LoveAgent:
     def __init__(self):
@@ -15,154 +19,265 @@ class LoveAgent:
             "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json"
         }
+        self.rm = RelationshipManager()
+        self.current_topic_person = None 
         
-        # ─── 階段 1: 工具判斷專用的 System Prompt (隱藏執行) ───
-        # 這個 Prompt 使用者看不到，專門用來逼模型吐出正確的 JSON 指令
+        # ─── 階段 1: 工具判斷專用的 System Prompt ───
+        # 融合了你的基底要求 + 存檔必要的邏輯
         self.tool_selector_prompt = """
         You are a function calling intent detector. 
         Your ONLY job is to analyze the user's input and output a JSON object to call a tool.
         
-        Rules:
-        1. If user asks about constellation, MBTI, or love strategy -> tool: "search_strategy".
-           ⚠️ CRITICAL FOR ARGUMENT: Extract ONLY the specific noun (Subject). Do NOT include "how to", "characteristics of", "girl", "boy".
-           - User: "天蠍座女孩的特性" -> arg: "天蠍座" (NOT "天蠍座女孩")
-           - User: "怎麼追雙魚座" -> arg: "雙魚座"
-           - User: "INFP 的性格" -> arg: "INFP"
-           
-        2. If user provides chat history or asks for analysis -> tool: "calculate_score", arg: "USER_INPUT".
-        3. If user asks how to reply or needs help replying -> tool: "get_reply_styles", arg: "TARGET_SENTENCE".
-        4. If user searches for place/movie/restaurant -> tool: "search_web", arg: "QUERY".
-        5. If NO tool is needed, output: {"tool": "none", "arg": ""}
+        IMPORTANT: Output strictly valid JSON.
         
-        Output format must be strict JSON. No other text.
+        🔥🔥 CRITICAL PRIORITY (SAVE PROFILE) 🔥🔥:
+        If user input contains **Name/Pronoun** AND **Trait/Hobby/Info**, you **MUST** choose "save_profile".
+        - Logic: Extract ALL traits mentioned.
+        - **Fix Pronouns**: If user says "他/她" (He/She), output "save_profile" with name="他/她". The system will handle the coreference.
+        - **Accumulate Info**: Capture likes, dislikes, habits.
+        
+        Tools & Rules:
+        1. **Save Person Info** (Highest Priority):
+           - Tool: "save_profile"
+           - Rule: Capture Name and Info.
+           - Example 1 (Multiple Traits): "MuQ醬是雙子座, ENFP" -> {"tool": "save_profile", "arg": {"name": "MuQ醬", "info": {"星座": "雙子座", "MBTI": "ENFP"}}}
+           - Example 2 (Hobby): "她喜歡看海" -> {"tool": "save_profile", "arg": {"name": "她", "info": {"喜好": "喜歡看海"}}}
+
+        2. **Delete Person**:
+           - Tool: "delete_profile", Arg: "Name"
+
+        3. **Search Strategy/Knowledge**:
+           - Tool: "search_strategy"
+           - Rule: Extract ONLY the specific noun.
+           - User: "天蠍座女孩的特性" -> arg: "天蠍座"
+           - User: "怎麼追雙魚座" -> arg: "雙魚座"
+
+        4. **Analyze Chat/Score**:
+           - Tool: "calculate_score", arg: "USER_INPUT"
+
+        5. **Reply Help**:
+           - Tool: "get_reply_styles", arg: "TARGET_SENTENCE"
+
+        6. **Search Web (Locations/Dates)**:
+           - Tool: "search_web", arg: "QUERY"
+           - Example: "推薦海邊的餐廳" -> {"tool": "search_web", "arg": "海邊餐廳 推薦"}
+
+        7. **No Tool Needed**:
+           - Output: {"tool": "none", "arg": ""}
         """
 
-        # ─── 階段 2: 戀愛軍師 System Prompt (你指定的內容) ───
+        # ─── 階段 2: 戀愛軍師 System Prompt ───
+        # 使用你要求的 Prompt，並加入「讀取記憶」的指示
         self.main_system_prompt = """
         你是一位專業、犀利但情商極高的「戀愛軍師 AI」。你的任務是協助使用者解決戀愛煩惱。
         
+        【重要：記憶庫使用指示】
+        系統會將「目前話題對象」的資料（星座、MBTI、喜好）提供給你。
+        1. **不要明知故問**：如果資料庫已經顯示對方是 "ENFP" 或 "雙子座"，請直接根據這些特質進行分析，**絕對不要再反問**使用者「他是什麼星座？」或「有測過MBTI嗎？」。
+        2. **喜好整合**：如果資料顯示對方「喜歡看海」或「討厭蟲子」，安排行程時請務必避開地雷並投其所好。
+
         【最高指導原則】
-        1. **絕對不要暴露工具失誤**：如果工具回傳「無結果」或「錯誤」，請直接用你的內建知識回答，**絕對不要說**「搜尋結果無」、「找不到資料」這種話。
-        2. **語氣**：保持自信、幽默、像是大學生之間的對話。
+        1. **絕對不要暴露工具失誤**：如果工具回傳「無結果」，請直接用你的內建知識回答。
+        2. **語氣**：保持自信、幽默、像是神秘情場高手的對話。
 
         【人設指導原則】
-        1. **判斷邀約**：如果使用者的對話中包含對方主動約（如「要不要出去」），這是極好的訊號。
-        2. **處理「拒絕」情境**：如果使用者說「我那天有事」、「不想去」，**千萬不要教使用者無禮地回應**。
-           - 正確策略：**「三明治拒絕法」** = 開心接受心意 + 誠實說明不行 + 主動提出替代方案（改期）。
-           - 例如：「那天我不行耶 (拒絕)，但我想去！ (情緒價值)，下週呢？ (改期)」。
-        3. **毒舌但不白目**：毒舌是用來罵醒暈船的使用者，**不是用來罵曖昧對象的**。對曖昧對象要保持高價值但友善。        
-        4. **提供戰術**：點出問題後，提供「反制手段」或「停損點」。
-
-        【工具使用判斷邏輯】
-        (系統已在背景執行完畢，結果會附在對話中，請直接參考結果回答)
+        1. **判斷邀約**：如果對話中包含對方主動約，這是極好的訊號。
+        2. **處理「拒絕」情境**：教導使用「三明治拒絕法」（感謝 -> 拒絕 -> 替代方案）。
+        3. **毒舌但不白目**：對使用者毒舌（罵醒），對曖昧對象尊重。
         
         【回應格式】
-        1. **直接回答**：請直接輸出建議內容，**不要**輸出 JSON 格式，也**不要**顯示「工具使用建議」或「我建議呼叫...」。
-        2. **整合結果**：如果系統提供了【回覆風格建議】，請務必將那三種風格（高冷/幽默/真誠）完整列出來給使用者選擇。
+        請直接輸出建議內容，不要顯示 JSON 或「工具建議」。
         """
         
-        # 初始化記憶 (只存放對話內容，不存放工具指令，保持乾淨)
         self.history = [{"role": "system", "content": self.main_system_prompt}]
 
     def reset(self):
         self.history = [{"role": "system", "content": self.main_system_prompt}]
-        return "🧹 記憶已清除，人設重置，我們重新開始吧！"
+        self.current_topic_person = None 
+        return "🧹 記憶已清除，我們重新開始吧！"
 
     def _call_api(self, messages, temperature=0.7):
-        """共用的 API 呼叫函式"""
+        """呼叫 LLM API (強效相容版：支援 OpenAI/Ollama/LocalAI 各種格式)"""
         payload = {
             "model": MODEL_NAME,
             "messages": messages,
             "stream": False,
             "temperature": temperature
         }
-        try:
-            res = requests.post(API_URL, headers=self.headers, json=payload, timeout=TIMEOUT)
-            if res.status_code == 200:
-                data = res.json()
-                # 兼容不同 API 回傳格式
-                if "choices" in data:
-                    return data["choices"][0]["message"]["content"]
-                elif "message" in data:
-                    return data["message"]["content"]
-            print(f"⚠️ API Error: {res.status_code} - {res.text}")
-            return None
-        except Exception as e:
-            print(f"❌ 連線例外: {e}")
-            return None
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # 設定 Timeout (建議 config.py 設為 60以上)
+                res = requests.post(API_URL, headers=self.headers, json=payload, timeout=TIMEOUT)
+                
+                if res.status_code == 200:
+                    data = res.json()
+                    
+                    # 🔍 Debug: 如果你很好奇 API 到底回傳什麼，可以取消下面這行的註解
+                    # print(f"🔍 [API Debug] Keys: {list(data.keys())}")
+
+                    # 情況 1: 標準 OpenAI 格式 (LM Studio, vLLM, OpenAI)
+                    if "choices" in data and len(data["choices"]) > 0:
+                        return data["choices"][0]["message"]["content"]
+                    
+                    # 情況 2: Ollama 原生格式 / LocalAI
+                    if "message" in data:
+                        return data["message"]["content"]
+                        
+                    # 情況 3: 其他常見格式 (Text-Gen-WebUI 等)
+                    if "response" in data:
+                        return data["response"]
+                    
+                    # 情況 4: 只有 content (極少見)
+                    if "content" in data:
+                        return data["content"]
+
+                    # ❌ 雖然 200 OK 但找不到內容
+                    print(f"⚠️ API 回傳格式不明 (Status 200): {data}")
+                    return None
+                
+                else:
+                    print(f"⚠️ API Error (Status {res.status_code}): {res.text}")
+                
+            except requests.exceptions.Timeout:
+                print(f"⏳ 連線逾時 (嘗試 {attempt+1}/{max_retries})...")
+            except Exception as e:
+                print(f"❌ 連線例外 (嘗試 {attempt+1}/{max_retries}): {e}")
+            
+            # 失敗後暫停再試
+            if attempt < max_retries - 1:
+                time.sleep(2)
+
+        print("💀 重試失敗，放棄連線。")
+        return None
 
     def _detect_intent_and_run_tool(self, user_input):
-        """
-        階段 1：判斷是否需要工具，並執行工具
-        回傳: 工具執行結果 (字串) 或 None
-        """
-        # 建立一個臨時的 Message List，專門用來問「要不要用工具」
+        def try_parse_json(text):
+            cleaned = text.replace("```json", "").replace("```", "").strip()
+            try: return json.loads(cleaned)
+            except: pass
+            try: return ast.literal_eval(cleaned)
+            except: pass
+            return None
+
+        # 資料清洗與標準化
+        def sanitize_info(info_dict):
+            cleaned_info = {}
+            for k, v in info_dict.items():
+                value_str = str(v).strip()
+                new_key = k 
+                # 關鍵字對應修正
+                if "座" in value_str: new_key = "星座"
+                elif re.match(r"^[A-Za-z]{4}$", value_str): new_key = "MBTI"; value_str = value_str.upper()
+                
+                if value_str == "蠍座": value_str = "天蠍座" # 簡單補救
+                
+                cleaned_info[new_key] = value_str
+            return cleaned_info
+
         selector_messages = [
             {"role": "system", "content": self.tool_selector_prompt},
             {"role": "user", "content": f"User Input: {user_input}"}
         ]
         
-        # 呼叫 API (低溫模式，確保 JSON 格式精準)
-        print("🕵️ [系統] 正在判斷使用者意圖...")
+        print("🕵️ [系統] 正在判斷意圖...")
         response = self._call_api(selector_messages, temperature=0.1)
+        if not response: return None
         
-        if not response:
-            return None
+        cmd = try_parse_json(response)
+        if not cmd: return None
 
-        # 嘗試解析 JSON
         try:
-            # 清理回應，避免 markdown 干擾
-            cleaned = response.replace("```json", "").replace("```", "").strip()
-            cmd = json.loads(cleaned)
-            
             tool_name = cmd.get("tool")
             arg = cmd.get("arg")
-            
+
             if tool_name and tool_name != "none":
-                print(f"🔧 [觸發工具] {tool_name} | 參數: {arg}")
                 
-                # 執行對應工具
-                if tool_name == "search_strategy":
-                    return LoveTools.search_love_strategy(arg) # 這裡傳進去的 arg 只會是關鍵字 (如 "雙魚座")
-                elif tool_name == "calculate_score":
-                    return LoveTools.calculate_interest_score(arg)
-                elif tool_name == "get_reply_styles":
-                    return LoveTools.generate_reply_styles(arg)
-                elif tool_name == "search_web":
-                    return LoveTools.search_web(arg)
-            else:
-                print("Checking... 不需要工具")
+                # ▼▼▼ 存檔邏輯 ▼▼▼
+                if tool_name == "save_profile":
+                    data = arg
+                    if isinstance(arg, str): 
+                        parsed = try_parse_json(arg)
+                        if parsed: data = parsed
+                    
+                    if isinstance(data, dict) and "name" in data:
+                        raw_name = data["name"]
+                        raw_info = data.get("info", {})
+                        
+                        # 1. 代名詞修正 (最重要的上下文串接)
+                        pronouns = ["他", "她", "它", "你", "我", "祂", "He", "She", "It", "You"]
+                        if raw_name in pronouns:
+                            if self.current_topic_person:
+                                print(f"🔄 [代名詞修正] '{raw_name}' -> '{self.current_topic_person}'")
+                                raw_name = self.current_topic_person
+                            else:
+                                return "系統提示：請先告知對象名字，我才能存檔喔。"
+                        else:
+                            self.current_topic_person = raw_name # 更新話題主角
+                            print(f"📌 [鎖定對象] {self.current_topic_person}")
+
+                        # 2. 清洗與儲存
+                        final_info = sanitize_info(raw_info)
+                        print(f"🔧 [觸發工具] save_profile | {raw_name} : {final_info}")
+                        return self.rm.save_person(raw_name, final_info)
+                    
+                elif tool_name == "delete_profile":
+                    if arg == self.current_topic_person: self.current_topic_person = None
+                    return self.rm.delete_person(arg)
                 
-        except json.JSONDecodeError:
-            print(f"⚠️ JSON 解析失敗 (模型可能沒吐出 JSON): {response}")
-        except Exception as e:
-            print(f"⚠️ 工具執行錯誤: {e}")
+                elif tool_name == "search_strategy": return LoveTools.search_love_strategy(arg)
+                elif tool_name == "calculate_score": return LoveTools.calculate_interest_score(arg)
+                elif tool_name == "get_reply_styles": return LoveTools.generate_reply_styles(arg)
+                elif tool_name == "search_web": return LoveTools.search_web(arg)
             
-        return None
+            return None 
+        except Exception as e:
+            return f"系統錯誤: {e}"
+
+    def _check_and_load_profile(self, user_input):
+        """主動載入話題人物資料"""
+        known_names = self.rm.get_all_names()
+        found_data = ""
+        # 1. 先檢查有沒有直接提到名字
+        for name in known_names:
+            if name in user_input:
+                self.current_topic_person = name
+                break
+        
+        # 2. 如果有鎖定對象，就載入他的資料
+        if self.current_topic_person:
+            profile = self.rm.get_person(self.current_topic_person)
+            if profile:
+                found_data = f"【當前話題對象：{self.current_topic_person}】\n{json.dumps(profile, ensure_ascii=False)}\n"
+                print(f"📖 [記憶載入] {self.current_topic_person}")
+        
+        return found_data
 
     def chat(self, user_input):
-        # 1. 先執行「階段 1」：意圖判斷與工具執行
-        # 這一口氣做完，不會影響到主對話紀錄
+        # 1. 執行工具
         tool_result = self._detect_intent_and_run_tool(user_input)
 
-        # 2. 準備「階段 2」：正式回答
+        # 2. 載入人物記憶 (包含剛存進去的)
+        profile_context = self._check_and_load_profile(user_input)
+
+        # 3. 組合 Prompt
         self.history.append({"role": "user", "content": user_input})
-        
-        # 如果有工具結果，我們把它偽裝成一個 System Message 插在最新的對話之前
-        # 讓軍師以為這是他自己腦袋裡的知識
         current_messages = self.history.copy()
         
-        if tool_result:
-            print(f"📄 [注入資料] 已將工具結果提供給軍師參考")
-            # 插入一條系統提示，告訴軍師這是參考資料
-            system_hint = {
-                "role": "system", 
-                "content": f"【背景資訊】(使用者看不到這條)\n關於使用者的問題，我們查到了以下資料：\n{tool_result}\n\n請利用上述資料，依據你的「毒舌軍師」人設給出建議。請不要提及「搜尋結果」字眼，把它當作你的常識。"
-            }
-            # 插在倒數第二個位置 (User 訊息之前) 或直接放在最後作為補充
-            current_messages.insert(-1, system_hint)
+        system_hint = ""
+        
+        # ★ 關鍵修正：告訴軍師工具剛才做了什麼，以及資料庫裡有什麼
+        if tool_result: 
+            system_hint += f"【系統背景執行報告】{tool_result}\n(請忽略回報訊息，直接針對使用者的 Input 回答)\n"
+        
+        if profile_context: 
+            system_hint += f"【資料庫人物檔案】(請依此個性與喜好分析)\n{profile_context}\n"
+            
+        if system_hint:
+            # 插入在最後一句之前，作為當前 Context 的補充
+            current_messages.insert(-1, {"role": "system", "content": system_hint})
 
-        # 3. 呼叫軍師生成回覆
         print("🤖 [軍師思考中]...")
         ai_reply = self._call_api(current_messages, temperature=0.7)
         
@@ -170,7 +285,7 @@ class LoveAgent:
             self.history.append({"role": "assistant", "content": ai_reply})
             return ai_reply
         else:
-            return "軍師現在有點斷線（學校伺服器忙碌中），請稍後再試..."
+            return "軍師斷線中..."
   ```
 
 </details> 
@@ -407,6 +522,87 @@ class LoveTools:
 
 </details> 
 
+<details>
+  <summary>relationship_manager.py  </summary>
+
+  ```python
+# relationship_manager.py
+import json
+import os
+
+DB_FILE = "relationships.json"
+
+class RelationshipManager:
+    def __init__(self):
+        self._ensure_db_exists()
+
+    def _ensure_db_exists(self):
+        if not os.path.exists(DB_FILE):
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                json.dump({}, f, ensure_ascii=False, indent=4)
+
+    def _load_db(self):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            return {}
+
+    def _save_db(self, data):
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
+    def save_person(self, name, attributes):
+        """
+        新增或更新人物資料
+        ★ 修正邏輯：針對 '喜好' 欄位進行追加，而非覆蓋。
+        """
+        data = self._load_db()
+        
+        if name not in data:
+            data[name] = {"info": {}}
+        
+        # 確保 info 存在
+        if "info" not in data[name]:
+            data[name]["info"] = {}
+
+        current_info = data[name]["info"]
+        new_info = attributes
+
+        for key, value in new_info.items():
+            # 特殊邏輯：如果是「喜好」或「討厭」，且原本就有資料，則追加
+            if key in ["喜好", "討厭", "地雷"] and key in current_info:
+                # 避免重複追加一樣的內容
+                if value not in current_info[key]:
+                    current_info[key] = f"{current_info[key]}、{value}"
+            else:
+                # 其他欄位 (如星座、MBTI) 直接覆蓋更新
+                current_info[key] = value
+        
+        # 寫回 update 好的資料
+        data[name]["info"] = current_info
+        
+        self._save_db(data)
+        return f"已記錄/更新對象【{name}】的資料：{current_info}"
+
+    def get_person(self, name):
+        data = self._load_db()
+        return data.get(name, None)
+
+    def delete_person(self, name):
+        data = self._load_db()
+        if name in data:
+            del data[name]
+            self._save_db(data)
+            return f"已將【{name}】從記憶庫中永久刪除！"
+        return f"記憶庫中找不到【{name}】。"
+
+    def get_all_names(self):
+        data = self._load_db()
+        return list(data.keys())
+  ```
+
+</details> 
 
 !!資料夾frontend裡有.html,.js,.css
 
