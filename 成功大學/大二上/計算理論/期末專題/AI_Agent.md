@@ -187,7 +187,7 @@ API_URL = "https://api-gateway.netdb.csie.ncku.edu.tw/api/chat"
 MODEL_NAME = "gemma3:4b" # 或其他你偏好的模型
 
 # 系統設定
-TIMEOUT = 30  # API 請求超時秒數
+TIMEOUT = 120  # API 請求超時秒數
   ```
 
 </details> 
